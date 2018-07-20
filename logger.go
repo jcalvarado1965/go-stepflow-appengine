@@ -1,4 +1,4 @@
-package stepflow_ae
+package stepflowae
 
 import (
 	"context"

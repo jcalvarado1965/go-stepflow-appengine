@@ -1,4 +1,4 @@
-package stepflow_ae
+package stepflowae
 
 import (
 	"context"
@@ -18,7 +18,9 @@ type appengineStorage struct {
 const dataflowRunKind = "DataflowRun"
 const flowKind = "Flow"
 const flowSplitKind = "FlowSplit"
-const dataflowRunJSON = "dataflowRunJSON"
+const dataflowRunJSON = "DataflowRunJSON"
+const dataflowRunState = "State"
+const dataflowRunDFID = "DataflowID"
 
 var errNotFound = errors.New("Not found")
 
@@ -56,6 +58,8 @@ func (as *appengineStorage) StoreDataflowRun(ctx context.Context, run *stepflow.
 	}
 	entity := &datastore.PropertyList{
 		datastore.Property{Name: dataflowRunJSON, Value: buff, NoIndex: true},
+		datastore.Property{Name: dataflowRunState, Value: string(run.State)},
+		datastore.Property{Name: dataflowRunDFID, Value: run.Dataflow.ID},
 	}
 
 	_, err = datastore.Put(ctx, key, entity)
@@ -77,23 +81,25 @@ func (as *appengineStorage) RetrieveDataflowRuns(ctx context.Context, keys []ste
 		as.Logger.Errorf(ctx, "Error retrieving dataflow runs: %s", err.Error())
 	} else {
 		for _, entity := range entities {
-			// there should only be the one property dataflowRunJSON
-			if len(entity) == 0 || (entity)[0].Name != dataflowRunJSON {
-				as.Logger.Errorf(ctx, "Entity does not have dataflowRunJSON property")
+			// get the JSON for the run
+			var buff []byte
+			for _, prop := range entity {
+				if prop.Name == dataflowRunJSON {
+					buff, _ = prop.Value.([]byte)
+				}
+			}
+
+			if buff == nil {
+				as.Logger.Errorf(ctx, "Entity does not have dataflowRunJSON property or it is not []byte")
 				return runs
 			}
 
 			var run stepflow.DataflowRun
-			if buff, ok := (entity)[0].Value.([]byte); ok {
-				if err := json.Unmarshal(buff, &run); err != nil {
-					as.Logger.Errorf(ctx, "Error unmarshalling entity %s", err.Error())
-					return runs
-				}
-				runs[run.ID] = &run
-			} else {
-				as.Logger.Errorf(ctx, "Entity dataflowRunJSON property is not []byte")
+			if err := json.Unmarshal(buff, &run); err != nil {
+				as.Logger.Errorf(ctx, "Error unmarshalling entity %s", err.Error())
 				return runs
 			}
+			runs[run.ID] = &run
 		}
 	}
 	return runs
@@ -142,17 +148,23 @@ func (as *appengineStorage) StoreFlow(ctx context.Context, flow *stepflow.Flow) 
 
 func (as *appengineStorage) RetrieveFlows(ctx context.Context, keys []stepflow.FlowID) map[stepflow.FlowID]*stepflow.Flow {
 	var dsKeys []*datastore.Key
-	for key := range keys {
+	for _, key := range keys {
 		dsKeys = append(dsKeys, datastore.NewKey(ctx, flowKind, string(key), 0, nil))
 	}
 
-	var flowList []stepflow.Flow
+	as.Logger.Debugf(ctx, "Retrieving flows with IDs %v", dsKeys)
+
+	flowList := make([]flowDatastore, len(dsKeys))
 	flows := make(map[stepflow.FlowID]*stepflow.Flow)
-	if err := datastore.GetMulti(ctx, dsKeys, &flowList); err != nil {
+	if err := datastore.GetMulti(ctx, dsKeys, flowList); err != nil {
 		as.Logger.Errorf(ctx, "Error retrieving flows: %s", err.Error())
 	} else {
-		for _, flow := range flowList {
-			flows[flow.ID] = &flow
+		as.Logger.Debugf(ctx, "Retrieved flows %v", flowList)
+		for _, flowDs := range flowList {
+			flows[flowDs.ID] = &stepflow.Flow{
+				FlowNoData: flowDs.FlowNoData,
+				Data:       flowDs.Data,
+			}
 		}
 	}
 	return flows
@@ -175,17 +187,20 @@ func (as *appengineStorage) StoreFlowSplit(ctx context.Context, flowSplit *stepf
 
 func (as *appengineStorage) RetrieveFlowSplits(ctx context.Context, keys []stepflow.FlowSplitID) map[stepflow.FlowSplitID]*stepflow.FlowSplit {
 	var dsKeys []*datastore.Key
-	for key := range keys {
+	for _, key := range keys {
 		dsKeys = append(dsKeys, datastore.NewKey(ctx, flowSplitKind, string(key), 0, nil))
 	}
 
-	var flowSplitList []stepflow.FlowSplit
+	as.Logger.Debugf(ctx, "Retrieving flow splits with IDs %v", dsKeys)
+
+	flowSplitList := make([]stepflow.FlowSplit, len(dsKeys))
 	flowSplits := make(map[stepflow.FlowSplitID]*stepflow.FlowSplit)
-	if err := datastore.GetMulti(ctx, dsKeys, &flowSplitList); err != nil {
+	if err := datastore.GetMulti(ctx, dsKeys, flowSplitList); err != nil {
 		as.Logger.Errorf(ctx, "Error retrieving flow splits: %s", err.Error())
 	} else {
-		for _, flowSplit := range flowSplits {
-			flowSplits[flowSplit.ID] = flowSplit
+		as.Logger.Debugf(ctx, "Got flow splits %v", flowSplitList)
+		for _, flowSplit := range flowSplitList {
+			flowSplits[flowSplit.ID] = &flowSplit
 		}
 	}
 	return flowSplits
@@ -199,7 +214,9 @@ func (as *appengineStorage) DeleteFlowSplit(ctx context.Context, key stepflow.Fl
 }
 
 func (as *appengineStorage) Increment(ctx context.Context, key string, initialValue int64, increment int64) int64 {
-	newVal, _ := memcache.Increment(ctx, key, increment, uint64(initialValue))
+	as.Logger.Debugf(ctx, "-------Incrementing %s with init %d, incr %d", key, initialValue-increment, increment)
+	newVal, _ := memcache.Increment(ctx, key, increment, uint64(initialValue-increment))
+	as.Logger.Debugf(ctx, "Incr returning %d", newVal)
 	return int64(newVal)
 }
 
